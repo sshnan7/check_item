@@ -1,10 +1,11 @@
 """
 디올 메달리옹 재입고 알림봇
 - 1분마다 상품 페이지 제목(h1)에 "[품절]"이 붙어 있는지 확인합니다.
-- "[품절]"이 사라지면 ntfy로 긴급 알림을 보냅니다 (재고가 있는 동안 5분마다 반복).
-- 1시간마다 "정상 작동 중" 알림을 보냅니다.
+- 재고가 있으면 1분마다 요란한 긴급 알림을 보냅니다.
+- 품절 중에는 5분마다 현재 상태 알림을 보냅니다.
 - GitHub Actions가 매시간 새로 실행하며, 새 실행이 이전 실행을 대체합니다.
 """
+import json
 import os
 import re
 import sys
@@ -19,8 +20,7 @@ PRODUCT_URL = (
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 
 CHECK_INTERVAL = 60            # 재고 확인 간격 (초)
-HEARTBEAT_INTERVAL = 60 * 60   # 정상 작동 알림 간격 (초)
-RESTOCK_REPEAT = 5 * 60        # 재고가 있는 동안 재알림 간격 (초)
+HEARTBEAT_INTERVAL = 5 * 60    # 상태 알림 간격 (초)
 RUN_DURATION = int(os.environ.get("RUN_DURATION", 5 * 60 * 60 + 40 * 60))  # 한 번 실행 시 최대 동작 시간
 
 KST = timezone(timedelta(hours=9))
@@ -61,13 +61,19 @@ def notify(title: str, message: str, priority: str = "default", tags: str = "") 
     if not NTFY_TOPIC:
         log("NTFY_TOPIC이 없어 알림을 보내지 않습니다.")
         return
-    headers = {"Title": title.encode("utf-8"), "Priority": priority, "Click": PRODUCT_URL}
-    if tags:
-        headers["Tags"] = tags
+    # JSON으로 보내면 제목의 한글·이모지가 깨지지 않습니다.
+    payload = {
+        "topic": NTFY_TOPIC,
+        "title": title,
+        "message": message,
+        "priority": {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}[priority],
+        "tags": [t for t in tags.split(",") if t],
+        "click": PRODUCT_URL,
+    }
     req = urllib.request.Request(
-        f"https://ntfy.sh/{NTFY_TOPIC}",
-        data=message.encode("utf-8"),
-        headers=headers,
+        "https://ntfy.sh/",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -91,42 +97,38 @@ def check_once() -> tuple[str, str]:
 def main() -> int:
     start = time.monotonic()
     last_heartbeat = None
-    last_restock_alert = None
     checks = errors = 0
-    last_status, last_detail = "unknown", ""
 
     while time.monotonic() - start < RUN_DURATION:
         loop_start = time.monotonic()
         status, detail = check_once()
         checks += 1
-        last_status, last_detail = status, detail
         log(f"{status}: {detail}")
 
         if status == "error":
             errors += 1
         elif status == "instock":
-            if last_restock_alert is None or loop_start - last_restock_alert >= RESTOCK_REPEAT:
-                notify(
-                    "디올 메달리옹 재입고!",
-                    "지금 구매 가능해요. 알림을 눌러 바로 이동하세요.",
-                    priority="urgent",
-                    tags="tada,lipstick",
-                )
-                last_restock_alert = loop_start
-        else:
-            last_restock_alert = None
-
-        if last_heartbeat is None or loop_start - last_heartbeat >= HEARTBEAT_INTERVAL:
-            state = {"soldout": "아직 품절", "instock": "재고 있음!", "error": "확인 오류"}.get(last_status, last_status)
-            msg = f"현재 상태: {state}\n최근 1시간 확인 {checks}회"
-            if errors:
-                msg += f", 오류 {errors}회\n마지막 오류: {last_detail}" if last_status == "error" else f", 오류 {errors}회"
+            # 재고가 있으면 매 확인(1분)마다 요란하게 울림
             notify(
-                "재입고 알림봇 정상 작동 중" if errors < checks else "재입고 알림봇 확인 오류",
-                msg,
-                priority="low" if errors < checks else "high",
-                tags="white_check_mark" if errors < checks else "warning",
+                "🚨🚨 재입고!!! 디올 메달리옹 지금 구매 가능 🚨🚨",
+                "🔥🔥 지금 당장 들어가세요!!! 🔥🔥\n"
+                "⏰ 한정판이라 금방 다시 품절돼요!\n"
+                "👉 알림 누르면 바로 상품 페이지로 이동 👈\n"
+                "💄💄💄 GO GO GO 💄💄💄",
+                priority="urgent",
+                tags="rotating_light,fire,lipstick,warning",
             )
+            last_heartbeat = loop_start  # 재고 알림이 상태 알림을 대신함
+
+        if status != "instock" and (last_heartbeat is None or loop_start - last_heartbeat >= HEARTBEAT_INTERVAL):
+            if status == "error":
+                notify("⚠️ 재입고 알림봇 확인 오류", f"최근 5분 확인 {checks}회 중 오류 {errors}회\n{detail}",
+                       priority="high", tags="warning")
+            else:
+                msg = f"아직 품절이에요. 계속 지켜보는 중 👀\n최근 5분 확인 {checks}회"
+                if errors:
+                    msg += f" (오류 {errors}회)"
+                notify("상태: 품절 · 알림봇 정상 작동 중", msg, priority="low", tags="white_check_mark")
             last_heartbeat = loop_start
             checks = errors = 0
 
