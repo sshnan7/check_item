@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: "*/10 * * * *"   # 10분마다 실행
   workflow_dispatch:          # 수동 실행 버튼
+  push:                       # 파일이 바뀌면 바로 한 번 실행
 
 jobs:
   check:
@@ -15,5 +16,5 @@ jobs:
           python-version: "3.12"
       - name: 재고 확인
         env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC || 'dior-medaillon-5f0c9963' }}
         run: python check_stock.py
