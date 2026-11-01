@@ -124,7 +124,7 @@ def main() -> int:
             notify(
                 "재입고 알림봇 정상 작동 중" if errors < checks else "재입고 알림봇 확인 오류",
                 msg,
-                priority="min" if errors < checks else "high",
+                priority="low" if errors < checks else "high",
                 tags="white_check_mark" if errors < checks else "warning",
             )
             last_heartbeat = loop_start
