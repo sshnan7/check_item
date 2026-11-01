@@ -2,14 +2,14 @@ name: 디올 재입고 확인
 
 on:
   schedule:
-    - cron: "0 * * * *"      # 매시간 새로 시작 (안에서 1분마다 확인)
+    - cron: "0 * * * *"      # 매시간 다음 실행을 대기열에 올려둠 (한 실행은 5시간 동안 1분마다 확인)
   workflow_dispatch:          # 수동 실행 버튼
-  push:                       # 파일이 바뀌면 바로 새로 시작
+  push:                       # 파일이 바뀌면 실행
 
-# 항상 하나만 실행: 새 실행이 시작되면 이전 실행을 종료
+# 항상 하나만 실행: 실행 중이면 새 실행은 기다렸다가 이어받음
 concurrency:
   group: restock-check
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   check:

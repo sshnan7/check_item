@@ -1,9 +1,9 @@
 """
 디올 메달리옹 재입고 알림봇
 - 1분마다 상품 페이지 제목(h1)에 "[품절]"이 붙어 있는지 확인합니다.
-- 재고가 있으면 1분마다 요란한 긴급 알림을 보냅니다.
-- 품절 중에는 5분마다 현재 상태 알림을 보냅니다.
-- GitHub Actions가 매시간 새로 실행하며, 새 실행이 이전 실행을 대체합니다.
+- 재입고되면 즉시 알림 + 1분마다 10분 동안 긴급 알림을 보냅니다 (총 10회).
+- 1시간마다 현재 상태와 그동안의 확인 횟수를 알려줍니다.
+- 한 번 실행이 5시간 동안 돌고, 대기 중이던 다음 실행이 이어받습니다.
 """
 import json
 import os
@@ -20,8 +20,10 @@ PRODUCT_URL = (
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 
 CHECK_INTERVAL = 60            # 재고 확인 간격 (초)
-HEARTBEAT_INTERVAL = 5 * 60    # 상태 알림 간격 (초)
-RUN_DURATION = int(os.environ.get("RUN_DURATION", 5 * 60 * 60 + 40 * 60))  # 한 번 실행 시 최대 동작 시간
+HEARTBEAT_INTERVAL = 60 * 60   # 상태 알림 간격 (초)
+RESTOCK_ALERT_COUNT = 10       # 재입고 발견 후 1분마다 보낼 알림 횟수 (= 10분)
+# 한 번 실행 시 동작 시간: 정확히 5시간(상태 알림 5번) 후 종료 → 대기 중이던 다음 실행이 이어받음
+RUN_DURATION = int(os.environ.get("RUN_DURATION", 5 * 60 * 60 + 30))
 
 KST = timezone(timedelta(hours=9))
 
@@ -96,39 +98,55 @@ def check_once() -> tuple[str, str]:
 
 def main() -> int:
     start = time.monotonic()
-    last_heartbeat = None
+    last_heartbeat = start          # 시작 후 1시간 뒤 첫 상태 알림
+    restock_since = None            # 이번 재입고를 처음 발견한 시각
+    restock_alerts = 0              # 이번 재입고에 보낸 알림 수
     checks = errors = 0
+    last_status, last_detail = "unknown", ""
 
     while time.monotonic() - start < RUN_DURATION:
         loop_start = time.monotonic()
         status, detail = check_once()
         checks += 1
         log(f"{status}: {detail}")
-
         if status == "error":
             errors += 1
-        elif status == "instock":
-            # 재고가 있으면 매 확인(1분)마다 요란하게 울림
-            notify(
-                "🚨🚨 재입고!!! 디올 메달리옹 지금 구매 가능 🚨🚨",
-                "🔥🔥 지금 당장 들어가세요!!! 🔥🔥\n"
-                "⏰ 한정판이라 금방 다시 품절돼요!\n"
-                "👉 알림 누르면 바로 상품 페이지로 이동 👈\n"
-                "💄💄💄 GO GO GO 💄💄💄",
-                priority="urgent",
-                tags="rotating_light,fire,lipstick,warning",
-            )
-            last_heartbeat = loop_start  # 재고 알림이 상태 알림을 대신함
+        else:
+            last_status = status
+        last_detail = detail
 
-        if status != "instock" and (last_heartbeat is None or loop_start - last_heartbeat >= HEARTBEAT_INTERVAL):
-            if status == "error":
-                notify("⚠️ 재입고 알림봇 확인 오류", f"최근 5분 확인 {checks}회 중 오류 {errors}회\n{detail}",
-                       priority="high", tags="warning")
-            else:
-                msg = f"아직 품절이에요. 계속 지켜보는 중 👀\n최근 5분 확인 {checks}회"
-                if errors:
-                    msg += f" (오류 {errors}회)"
-                notify("상태: 품절 · 알림봇 정상 작동 중", msg, priority="low", tags="white_check_mark")
+        if status == "instock":
+            if restock_since is None:
+                restock_since = loop_start  # 재입고 발견 → 즉시 알림 시작
+                restock_alerts = 0
+            # 발견 후 10분 동안 1분마다 알림 (총 10회)
+            if restock_alerts < RESTOCK_ALERT_COUNT:
+                restock_alerts += 1
+                n = restock_alerts
+                notify(
+                    f"🚨🚨 재입고!!! 디올 메달리옹 지금 구매 가능 🚨🚨 ({n}/10)",
+                    "🔥🔥 지금 당장 들어가세요!!! 🔥🔥\n"
+                    "⏰ 한정판이라 금방 다시 품절돼요!\n"
+                    "👉 알림 누르면 바로 상품 페이지로 이동 👈\n"
+                    "💄💄💄 GO GO GO 💄💄💄",
+                    priority="urgent",
+                    tags="rotating_light,fire,lipstick,warning",
+                )
+        elif status == "soldout":
+            restock_since = None  # 다시 품절되면 다음 재입고 때 또 알림
+
+        if loop_start - last_heartbeat >= HEARTBEAT_INTERVAL - 5:
+            state = {"soldout": "품절", "instock": "재고 있음!", "unknown": "확인 안 됨"}[last_status]
+            msg = f"현재 상태: {state}\n최근 1시간 동안 {checks}회 확인"
+            if errors:
+                msg += f" (오류 {errors}회)\n마지막 결과: {last_detail}"
+            failing = errors == checks
+            notify(
+                "⚠️ 재입고 알림봇 확인 오류" if failing else f"알림봇 정상 작동 중 · {state}",
+                msg,
+                priority="high" if failing else "default",
+                tags="warning" if failing else "white_check_mark",
+            )
             last_heartbeat = loop_start
             checks = errors = 0
 
