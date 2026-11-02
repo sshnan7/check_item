@@ -3,7 +3,14 @@ name: 디올 재입고 확인
 on:
   schedule:
     - cron: "0 * * * *"      # 매시간 다음 실행을 대기열에 올려둠 (한 실행은 5시간 동안 1분마다 확인)
-  workflow_dispatch:          # 수동 실행 버튼
+  workflow_dispatch:          # 수동 실행 버튼 (봇이 다음 실행을 예약할 때도 사용)
+    inputs:
+      error_since:
+        required: false
+        default: ""
+      last_error_alert:
+        required: false
+        default: ""
   push:                       # 파일이 바뀌면 실행
 
 # 항상 하나만 실행: 실행 중이면 새 실행은 기다렸다가 이어받음
@@ -33,4 +40,7 @@ jobs:
       - name: 재고 확인 (1분 간격)
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC || 'dior-medaillon-5f0c9963' }}
+          ERROR_SINCE: ${{ inputs.error_since }}
+          LAST_ERROR_ALERT: ${{ inputs.last_error_alert }}
+          GH_TOKEN: ${{ github.token }}
         run: python check_stock.py

@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -24,6 +25,7 @@ CHECK_INTERVAL = 60            # 재고 확인 간격 (초)
 HEARTBEAT_INTERVAL = 60 * 60   # 상태 알림 간격 (초)
 RESTOCK_ALERT_COUNT = 10       # 재입고 발견 후 1분마다 보낼 알림 횟수 (= 10분)
 ERROR_REPEAT = 10 * 60         # 오류가 계속될 때 재알림 간격 (초)
+RESTART_AFTER_ERRORS = 5       # 연속 오류가 이만큼 나면 새 서버에서 다시 시작
 # 한 번 실행 시 동작 시간: 정확히 5시간(상태 알림 5번) 후 종료 → 대기 중이던 다음 실행이 이어받음
 RUN_DURATION = int(os.environ.get("RUN_DURATION", 5 * 60 * 60 + 30))
 
@@ -98,6 +100,21 @@ def check_once() -> tuple[str, str]:
     return ("soldout" if is_sold_out(title) else "instock"), title
 
 
+def restart_on_new_runner(error_since: float | None, last_error_alert: float) -> None:
+    """다음 실행을 예약하면서 오류 상태를 넘겨줍니다 (알림이 중복으로 울리지 않도록)."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not repo:
+        return
+    try:
+        subprocess.run(
+            ["gh", "workflow", "run", "check.yml", "-R", repo, "--ref", "main",
+             "-f", f"error_since={error_since or ''}", "-f", f"last_error_alert={last_error_alert}"],
+            check=True, timeout=60,
+        )
+    except Exception as e:
+        log(f"다음 실행 예약 실패: {e}")
+
+
 def main() -> int:
     start = time.monotonic()
     last_heartbeat = start          # 시작 후 1시간 뒤 첫 상태 알림
@@ -105,21 +122,25 @@ def main() -> int:
     restock_alerts = 0              # 이번 재입고에 보낸 알림 수
     checks = errors = 0
     last_status, last_detail = "unknown", ""
-    error_since = None              # 연속 오류가 시작된 시각
-    last_error_alert = 0.0
+    # 연속 오류 상태 (이전 실행에서 넘겨받을 수 있음, 실제 시각 기준)
+    error_since = float(os.environ["ERROR_SINCE"]) if os.environ.get("ERROR_SINCE") else None
+    last_error_alert = float(os.environ.get("LAST_ERROR_ALERT") or 0)
+    consecutive_errors = 0
 
     while time.monotonic() - start < RUN_DURATION:
         loop_start = time.monotonic()
+        now = time.time()
         status, detail = check_once()
         checks += 1
         log(f"{status}: {detail}")
         if status == "error":
             errors += 1
+            consecutive_errors += 1
             # 오류가 나면 즉시 알림, 계속되면 10분마다 다시 알림
-            if error_since is None or loop_start - last_error_alert >= ERROR_REPEAT:
+            if error_since is None or now - last_error_alert >= ERROR_REPEAT:
                 if error_since is None:
-                    error_since = loop_start
-                streak = int((loop_start - error_since) // 60)
+                    error_since = now
+                streak = int((now - error_since) // 60)
                 notify(
                     "⚠️ 재입고 알림봇 확인 오류",
                     f"페이지를 제대로 확인하지 못했어요.\n{detail}"
@@ -127,10 +148,16 @@ def main() -> int:
                     priority="high",
                     tags="warning",
                 )
-                last_error_alert = loop_start
+                last_error_alert = now
+            # 사이트가 이 서버를 막은 경우: 실행을 끝내고 새 서버(새 IP)에서 다시 시작
+            if consecutive_errors >= RESTART_AFTER_ERRORS:
+                log(f"연속 오류 {consecutive_errors}회 → 새 서버에서 다시 시작합니다.")
+                restart_on_new_runner(error_since, last_error_alert)
+                return 0
         else:
+            consecutive_errors = 0
             if error_since is not None:
-                mins = max(1, round((loop_start - error_since) / 60))
+                mins = max(1, round((now - error_since) / 60))
                 notify("✅ 재입고 알림봇 복구됨", f"오류가 해결돼서 다시 정상 확인 중이에요. (약 {mins}분간 오류)",
                        priority="default", tags="white_check_mark")
                 error_since = None
