@@ -3,6 +3,7 @@
 - 1분마다 상품 페이지 제목(h1)에 "[품절]"이 붙어 있는지 확인합니다.
 - 재입고되면 즉시 알림 + 1분마다 10분 동안 긴급 알림을 보냅니다 (총 10회).
 - 1시간마다 현재 상태와 그동안의 확인 횟수를 알려줍니다.
+- 확인 오류가 나면 즉시 알림 (계속되면 10분마다), 복구되면 복구 알림을 보냅니다.
 - 한 번 실행이 5시간 동안 돌고, 대기 중이던 다음 실행이 이어받습니다.
 """
 import json
@@ -22,6 +23,7 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 CHECK_INTERVAL = 60            # 재고 확인 간격 (초)
 HEARTBEAT_INTERVAL = 60 * 60   # 상태 알림 간격 (초)
 RESTOCK_ALERT_COUNT = 10       # 재입고 발견 후 1분마다 보낼 알림 횟수 (= 10분)
+ERROR_REPEAT = 10 * 60         # 오류가 계속될 때 재알림 간격 (초)
 # 한 번 실행 시 동작 시간: 정확히 5시간(상태 알림 5번) 후 종료 → 대기 중이던 다음 실행이 이어받음
 RUN_DURATION = int(os.environ.get("RUN_DURATION", 5 * 60 * 60 + 30))
 
@@ -103,6 +105,8 @@ def main() -> int:
     restock_alerts = 0              # 이번 재입고에 보낸 알림 수
     checks = errors = 0
     last_status, last_detail = "unknown", ""
+    error_since = None              # 연속 오류가 시작된 시각
+    last_error_alert = 0.0
 
     while time.monotonic() - start < RUN_DURATION:
         loop_start = time.monotonic()
@@ -111,7 +115,25 @@ def main() -> int:
         log(f"{status}: {detail}")
         if status == "error":
             errors += 1
+            # 오류가 나면 즉시 알림, 계속되면 10분마다 다시 알림
+            if error_since is None or loop_start - last_error_alert >= ERROR_REPEAT:
+                if error_since is None:
+                    error_since = loop_start
+                streak = int((loop_start - error_since) // 60)
+                notify(
+                    "⚠️ 재입고 알림봇 확인 오류",
+                    f"페이지를 제대로 확인하지 못했어요.\n{detail}"
+                    + (f"\n{streak}분째 계속 오류 중" if streak else "\n다음 확인은 1분 뒤예요."),
+                    priority="high",
+                    tags="warning",
+                )
+                last_error_alert = loop_start
         else:
+            if error_since is not None:
+                mins = max(1, round((loop_start - error_since) / 60))
+                notify("✅ 재입고 알림봇 복구됨", f"오류가 해결돼서 다시 정상 확인 중이에요. (약 {mins}분간 오류)",
+                       priority="default", tags="white_check_mark")
+                error_since = None
             last_status = status
         last_detail = detail
 
