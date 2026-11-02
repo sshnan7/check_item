@@ -11,11 +11,21 @@ concurrency:
   group: restock-check
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: write   # 끝날 때 다음 실행을 직접 예약하기 위해 필요
+
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
+      # GitHub 예약 실행은 몇 시간씩 건너뛸 때가 있어서, 시작하자마자 다음 실행을 대기열에 올려둠
+      # (실행 중인 동안 대기하다가, 이 실행이 끝나면 바로 이어받음)
+      - name: 다음 실행 예약
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run check.yml -R ${{ github.repository }} --ref main
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
